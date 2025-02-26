@@ -112,19 +112,46 @@ python train.py
 训练完成后，可以使用模型进行预测：
 
 ```bash
-python predict.py
+python predict.py [参数]
 ```
 
-这将：
-- 加载训练好的模型
-- 使用测试数据进行预测
-- 为每个特征生成预测结果的可视化图表
-- 保存预测结果图表到当前目录
+预测脚本支持以下参数：
+- `--model_path`：模型检查点路径（可选，不指定则自动选择验证损失最低的检查点）
+- `--checkpoints_dir`：检查点目录路径（默认："checkpoints"）
+- `--data_path`：测试数据CSV文件路径（默认："data/test_data.csv"）
+- `--seq_len`：输入序列长度（默认：100）
+- `--pred_len`：预测序列长度（默认：20）
+- `--output_dir`：输出目录（默认："predictions"）
 
-预测结果图表包含：
-- 真实序列（蓝色实线）
-- 预测序列（红色虚线）
-- 预测起始点标记（绿色竖线）
+示例：
+```bash
+# 使用默认参数
+python predict.py
+
+# 指定参数
+python predict.py \
+    --model_path checkpoints/best_model.ckpt \
+    --data_path data/my_test_data.csv \
+    --seq_len 150 \
+    --pred_len 30 \
+    --output_dir my_predictions
+```
+
+预测过程说明：
+1. 模型采用自回归（autoregressive）方式生成预测序列
+2. 输入序列会被限制在 `seq_len` 长度内（过长则裁剪），以确保与训练时的输入长度匹配
+3. 每次预测时会使用之前的预测结果作为下一步预测的输入
+
+预测结果输出：
+1. 预测结果图表（每个特征一个图表）：
+   - 文件名：`prediction_result_feature_{i}.png`
+   - 包含真实值（蓝色实线）
+   - 预测值（红色虚线）
+   - 预测起始点标记（绿色竖线）
+
+2. 预测结果数据：
+   - 文件名：`prediction_results.csv`
+   - 包含时间步、每个特征的真实值和预测值
 
 ## 模型结构
 
