@@ -40,8 +40,8 @@ class CSVDataset(Dataset):
         # 读取CSV文件
         df = pd.read_csv(csv_file)
 
-        # 获取特征列（排除time_step列）
-        feature_cols = [col for col in df.columns if col.startswith("feature")]
+        # 获取特征列（除第一列外的所有列）
+        feature_cols = df.columns[1:]
 
         # 提取特征数据
         features = df[feature_cols].values  # (seq_len, num_features)
@@ -197,8 +197,8 @@ def load_test_sequence(csv_file, seq_len, pred_len):
     """从CSV文件加载测试序列"""
     df = pd.read_csv(csv_file)
 
-    # 获取特征列（排除time_step列）
-    feature_cols = [col for col in df.columns if col.startswith("feature")]
+    # 获取特征列（除第一列外的所有列）
+    feature_cols = df.columns[1:]
 
     # 提取特征数据
     features = df[feature_cols].values  # (seq_len, num_features)
@@ -252,10 +252,10 @@ def plot_results(
 
 def main():
     # 参数设置
-    seq_len = 100  # 恢复原来的输入序列长度
-    pred_len = 20  # 预测序列长度
+    seq_len = 500  # 恢复原来的输入序列长度
+    pred_len = 500  # 预测序列长度
     batch_size = 32
-    max_epochs = 30
+    max_epochs = 50
 
     # 检查数据目录是否存在
     if not os.path.exists("data"):
@@ -280,9 +280,9 @@ def main():
     output_dim = input_dim  # 输出维度与输入维度相同
 
     # 模型参数
-    hidden_dim = 64
-    num_layers = 8
-    num_heads = 4
+    hidden_dim = 256
+    num_layers = 10
+    num_heads = 8
 
     # 创建数据加载器
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -297,7 +297,7 @@ def main():
         output_dim=output_dim,
         num_layers=num_layers,
         num_heads=num_heads,
-        learning_rate=0.001,
+        learning_rate=8e-4,
         dropout=0.1,
     )
 
