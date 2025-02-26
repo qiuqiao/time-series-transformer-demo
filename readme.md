@@ -2,7 +2,7 @@
 
 ## 简介
 
-这是一个用于自回归时间序列预测的Transformer模型。输入输出均为(B,T,C)，B为批次大小，T为序列长度，C为特征数量，每一个时间步都用于预测下一个时间步的结果。
+这是一个基于PyTorch Lightning实现的用于自回归时间序列预测的Transformer模型。输入输出均为(B,T,C)，B为批次大小，T为序列长度，C为特征数量，每一个时间步都用于预测下一个时间步的结果。
 
 例：
 
@@ -19,6 +19,13 @@ x的维度为(B,T,C)，y的维度为(B,T,C)，y[b,t,c] 是使用 x[b,0:t,:]进�
 - 支持多头注意力
 - 包含位置编码，捕获序列中的位置信息
 - 可配置的模型大小（层数、隐藏维度、注意力头数等）
+- 基于PyTorch Lightning的训练框架
+- 支持学习率自动调整
+- 支持早停和模型检查点
+- 支持TensorBoard可视化
+- 自动滑动窗口数据处理
+- 多特征预测支持
+- 预测结果可视化
 
 ## 安装
 
@@ -35,6 +42,14 @@ cd mytransformer
 pip install -r requirements.txt
 ```
 
+依赖版本要求：
+- torch >= 1.9.0
+- numpy >= 1.20.0
+- matplotlib >= 3.4.0
+- pytest >= 6.2.5
+- pytorch-lightning >= 2.0.0
+- tensorboard >= 2.10.0
+
 ## 使用方法
 
 ### 基本用法
@@ -49,7 +64,9 @@ model = CausalTransformer(
     hidden_dim=64,     # 隐藏层维度
     output_dim=10,     # 输出特征维度
     num_layers=3,      # Transformer层数
-    num_heads=4        # 注意力头数
+    num_heads=4,       # 注意力头数
+    ff_dim=256,       # 前馈网络维度（可选）
+    dropout=0.1       # Dropout率（可选）
 )
 
 # 创建输入数据
@@ -64,7 +81,7 @@ y = model(x)  # 输出形状: (batch_size, seq_len, output_dim)
 
 ### CSV数据支持
 
-模型现在支持使用CSV数据文件进行训练。CSV中的每一行代表一个时间步，每一列代表一个特征。
+模型支持使用CSV数据文件进行训练。CSV中的每一行代表一个时间步，每一列代表一个特征。特征列应命名为"feature_1"、"feature_2"等。
 
 1. 生成样本CSV数据：
 
@@ -80,21 +97,34 @@ python generate_csv_data.py
 python train.py
 ```
 
-该脚本将：
-- 从CSV文件加载数据
-- 训练模型
-- 生成预测结果
-- 为每个特征保存可视化结果
+训练参数可在train.py中配置：
+- seq_len: 输入序列长度（默认100）
+- pred_len: 预测序列长度（默认20）
+- batch_size: 批次大小（默认32）
+- max_epochs: 最大训练轮数（默认30）
+- learning_rate: 学习率（默认0.001）
+- hidden_dim: 隐藏层维度
+- num_layers: Transformer层数
+- num_heads: 注意力头数
 
-### 运行示例
+### 预测和可视化
 
-项目包含一个示例脚本，展示如何使用模型进行时间序列预测：
+训练完成后，可以使用模型进行预测：
 
 ```bash
-python train.py
+python predict.py
 ```
 
-这将训练模型预测时间序列数据，并生成预测结果的可视化图表。
+这将：
+- 加载训练好的模型
+- 使用测试数据进行预测
+- 为每个特征生成预测结果的可视化图表
+- 保存预测结果图表到当前目录
+
+预测结果图表包含：
+- 真实序列（蓝色实线）
+- 预测序列（红色虚线）
+- 预测起始点标记（绿色竖线）
 
 ## 模型结构
 
