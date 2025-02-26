@@ -19,7 +19,7 @@ np.random.seed(42)
 class CSVDataset(Dataset):
     """从CSV文件加载时间序列数据集"""
 
-    def __init__(self, csv_file, seq_len, pred_len=1):
+    def __init__(self, csv_file, seq_len, pred_len=1, valid=False):
         """
         初始化数据集
 
@@ -27,9 +27,11 @@ class CSVDataset(Dataset):
             csv_file: CSV文件路径
             seq_len: 输入序列长度
             pred_len: 预测序列长度
+            valid: 是否使用验证模式（True时使用分段方式而不是滑动窗口）
         """
         self.seq_len = seq_len
         self.pred_len = pred_len
+        self.valid = valid
         self.data = self._load_data(csv_file)
         print(f"Loaded {len(self.data)} samples from {csv_file}")
 
@@ -44,7 +46,7 @@ class CSVDataset(Dataset):
         # 提取特征数据
         features = df[feature_cols].values  # (seq_len, num_features)
 
-        # 创建滑动窗口样本
+        # 创建数据样本
         data = []
 
         # 检查数据长度是否足够
@@ -54,15 +56,24 @@ class CSVDataset(Dataset):
             )
             return data
 
-        # 创建滑动窗口样本，每个样本包含输入序列和目标序列
-        for i in range(len(df) - self.seq_len - self.pred_len + 1):
-            # 输入序列: (seq_len, num_features)
-            input_seq = features[i : i + self.seq_len]
-            # 目标序列: (seq_len, num_features) - 包括输入序列和预测序列
-            # 这样模型就会学习预测整个序列，而不仅仅是下一个时间步
-            target_seq = features[i + 1 : i + self.seq_len + 1]
-
-            data.append((input_seq, target_seq))
+        if self.valid:
+            # 验证模式：将数据分成不重叠的段
+            total_samples = (len(df) - self.pred_len) // self.seq_len
+            for i in range(total_samples):
+                start_idx = i * self.seq_len
+                # 输入序列
+                input_seq = features[start_idx : start_idx + self.seq_len]
+                # 目标序列
+                target_seq = features[start_idx + 1 : start_idx + self.seq_len + 1]
+                data.append((input_seq, target_seq))
+        else:
+            # 训练模式：使用滑动窗口
+            for i in range(len(df) - self.seq_len - self.pred_len + 1):
+                # 输入序列: (seq_len, num_features)
+                input_seq = features[i : i + self.seq_len]
+                # 目标序列: (seq_len, num_features)
+                target_seq = features[i + 1 : i + self.seq_len + 1]
+                data.append((input_seq, target_seq))
 
         return data
 
@@ -255,9 +266,13 @@ def main():
 
     # 创建数据集
     print("Loading datasets...")
-    train_dataset = CSVDataset(csv_file="data/train_data.csv", seq_len=seq_len)
-    val_dataset = CSVDataset(csv_file="data/val_data.csv", seq_len=seq_len)
-    test_dataset = CSVDataset(csv_file="data/test_data.csv", seq_len=seq_len)
+    train_dataset = CSVDataset(
+        csv_file="data/train_data.csv", seq_len=seq_len, valid=False
+    )
+    val_dataset = CSVDataset(csv_file="data/val_data.csv", seq_len=seq_len, valid=True)
+    test_dataset = CSVDataset(
+        csv_file="data/test_data.csv", seq_len=seq_len, valid=True
+    )
 
     # 获取特征维度
     sample_x, _ = train_dataset[0]
@@ -265,8 +280,8 @@ def main():
     output_dim = input_dim  # 输出维度与输入维度相同
 
     # 模型参数
-    hidden_dim = 32
-    num_layers = 5
+    hidden_dim = 64
+    num_layers = 8
     num_heads = 4
 
     # 创建数据加载器
