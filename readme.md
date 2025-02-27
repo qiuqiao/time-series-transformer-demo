@@ -83,7 +83,7 @@ y = model(x)  # 输出形状: (batch_size, seq_len, output_dim)
 
 模型支持使用CSV数据文件进行训练。CSV中的每一行代表一个时间步，每一列代表一个特征。特征列应命名为"feature_1"、"feature_2"等。
 
-1. 生成样本CSV数据：
+1. 生成仅用于测试的玩具数据集：
 
 ```bash
 python generate_csv_data.py
@@ -93,11 +93,13 @@ python generate_csv_data.py
 
 2. 使用CSV数据训练模型：
 
+先在`data`目录中准备好`train_data.csv`和`val_data.csv`，然后运行：
+
 ```bash
 python train.py
 ```
 
-训练参数可在train.py中配置：
+训练参数可在train.py中修改：
 - seq_len: 输入序列长度（默认100）
 - pred_len: 预测序列长度（默认20）
 - batch_size: 批次大小（默认32）
@@ -107,10 +109,17 @@ python train.py
 - num_layers: Transformer层数
 - num_heads: 注意力头数
 
+可以使用tensorboard可视化训练过程：
+
+```bash
+tensorboard --logdir=lightning_logs
+```
+
 ### 预测和可视化
 
 训练完成后，可以使用模型进行预测：
 
+先在`data`目录中准备好`test_data.csv`，然后运行：
 ```bash
 python predict.py [参数]
 ```
@@ -122,6 +131,8 @@ python predict.py [参数]
 - `--seq_len`：输入序列长度（默认：100）
 - `--pred_len`：预测序列长度（默认：20）
 - `--output_dir`：输出目录（默认："predictions"）
+
+预测结果的值会保存在`output_dir/prediction_results.csv`中，预测结果图表会保存在`output_dir/prediction_result_feature_{i}.png`中，i为特征索引。
 
 示例：
 ```bash
@@ -163,7 +174,7 @@ python predict.py \
   - 前馈神经网络
 - **输出投影**：将隐藏表示映射回输出特征维度
 
-## 测试
+## 单元测试
 
 运行单元测试以验证模型的正确性：
 
