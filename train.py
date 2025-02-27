@@ -86,61 +86,119 @@ class CSVDataset(Dataset):
 
 
 class TransformerLightningModule(pl.LightningModule):
-    """PyTorch Lightning 模块，封装 CausalTransformer"""
+    """PyTorch Lightning 模块，封装 CausalTransformer 并添加高斯混合模型支持"""
 
     def __init__(
         self,
         input_dim,
         hidden_dim,
-        output_dim,
+        num_features,
         num_layers,
         num_heads,
+        num_gmm_kernels=5,
         learning_rate=0.001,
         ff_dim=None,
         dropout=0.1,
-        warmup_steps=200,  # 添加warmup步数参数
-        gamma=0.999,  # 添加指数衰减率参数
+        warmup_steps=200,
+        gamma=0.999,
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.num_features = num_features
+        self.num_gmm_kernels = num_gmm_kernels
 
-        # 创建模型
+        # 创建模型 - 输出维度为每个特征的每个高斯核的均值和方差
         self.model = CausalTransformer(
             input_dim=input_dim,
             hidden_dim=hidden_dim,
-            output_dim=output_dim,
+            output_dim=num_features
+            * num_gmm_kernels
+            * 2,  # 每个特征的每个高斯核都有均值和方差
             num_layers=num_layers,
             num_heads=num_heads,
             ff_dim=ff_dim,
             dropout=dropout,
         )
 
-        # 损失函数
-        self.criterion = nn.MSELoss()
+    def reparameterize(self, mu, logvar):
+        """重参数化技巧"""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def forward(self, x):
-        return self.model(x)
+        # 获取transformer的输出
+        output = self.model(
+            x
+        )  # (batch_size, seq_len, num_features * num_gmm_kernels * 2)
+
+        batch_size, seq_len, _ = output.shape
+
+        # 重塑输出以分离均值和方差
+        output = output.reshape(
+            batch_size, seq_len, self.num_features, self.num_gmm_kernels, 2
+        )
+        mu = output[..., 0]  # (batch_size, seq_len, num_features, num_gmm_kernels)
+        logvar = output[..., 1]  # (batch_size, seq_len, num_features, num_gmm_kernels)
+
+        res = self.reparameterize(
+            mu, logvar
+        )  # (batch_size, seq_len, num_features, num_gmm_kernels)
+        res = res.mean(dim=-1)  # (batch_size, seq_len, num_features)
+
+        return res, mu, logvar
+
+    def gaussian_nll_loss(self, y_true, mu, logvar):
+        """计算高斯负对数似然损失"""
+        var = torch.exp(logvar)
+        nll = 0.5 * (
+            torch.log(2 * np.pi * var) + (y_true.unsqueeze(-1) - mu) ** 2 / var
+        )
+        return nll.mean()
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self(x)
-        loss = self.criterion(y_hat, y)
+        y_hat, mu, logvar = self(x)
+
+        # 计算重构损失（MSE）
+        recon_loss = F.mse_loss(y_hat, y)
+
+        # 计算每个高斯核的负对数似然损失
+        nll_loss = self.gaussian_nll_loss(y, mu, logvar)
+
+        # 总损失
+        loss = recon_loss + nll_loss
+
         self.log("train_loss", loss, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log("train_recon_loss", recon_loss)
+        self.log("train_nll_loss", nll_loss)
         self.log("learning_rate", self.trainer.optimizers[0].param_groups[0]["lr"])
         return loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self(x)
-        loss = self.criterion(y_hat, y)
+        y_hat, mu, logvar = self(x)
+
+        recon_loss = F.mse_loss(y_hat, y)
+        nll_loss = self.gaussian_nll_loss(y, mu, logvar)
+        loss = recon_loss + nll_loss
+
         self.log("val_loss", loss, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log("val_recon_loss", recon_loss)
+        self.log("val_nll_loss", nll_loss)
         return loss
 
     def test_step(self, batch, batch_idx):
         x, y = batch
-        y_hat = self(x)
-        loss = self.criterion(y_hat, y)
+        y_hat, mu, logvar = self(x)
+
+        recon_loss = F.mse_loss(y_hat, y)
+        nll_loss = self.gaussian_nll_loss(y, mu, logvar)
+        loss = recon_loss + nll_loss
+
         self.log("test_loss", loss)
+        self.log("test_recon_loss", recon_loss)
+        self.log("test_nll_loss", nll_loss)
         return loss
 
     def configure_optimizers(self):
@@ -185,23 +243,16 @@ class TransformerLightningModule(pl.LightningModule):
             # 逐步预测
             for i in range(pred_len):
                 # 使用当前序列预测下一个值
-                pred = self(input_seq)
-                next_val = pred[:, -1, :].cpu().numpy()  # 获取最后一个预测值并转为numpy
+                pred, _, _ = self(input_seq)
+                next_val = pred[:, -1, :].cpu().numpy()
 
                 # 将预测值添加到输出序列
                 output_seq = np.vstack([output_seq, next_val[0]])
 
                 # 更新输入序列（滑动窗口）
-                if len(initial_seq) + i + 1 <= len(initial_seq):
-                    # 如果还在初始序列范围内，使用真实值
-                    input_seq = torch.FloatTensor(
-                        output_seq[-len(initial_seq) :]
-                    ).unsqueeze(0)
-                else:
-                    # 否则使用包含预测值的序列
-                    input_seq = torch.FloatTensor(
-                        output_seq[-len(initial_seq) :]
-                    ).unsqueeze(0)
+                input_seq = torch.FloatTensor(
+                    output_seq[-len(initial_seq) :]
+                ).unsqueeze(0)
 
         return output_seq
 
@@ -268,7 +319,7 @@ def main():
     seq_len = 500  # 恢复原来的输入序列长度
     pred_len = 500  # 预测序列长度
     batch_size = 32
-    max_epochs = 50
+    max_epochs = 30
 
     # 检查数据目录是否存在
     if not os.path.exists("data"):
@@ -307,7 +358,7 @@ def main():
     model = TransformerLightningModule(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
-        output_dim=output_dim,
+        num_features=output_dim,
         num_layers=num_layers,
         num_heads=num_heads,
         learning_rate=8e-4,

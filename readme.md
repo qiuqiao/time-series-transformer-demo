@@ -1,23 +1,21 @@
-# 多层因果Transformer
+# 使用多层因果Transformer与高斯混合模型进行时间序列预测
 
 ## 简介
 
 非常简单的小项目，仅仅用于完成学校的任务
 
-这是一个基于PyTorch Lightning实现的用于自回归时间序列预测的Transformer模型。输入输出均为(B,T,C)，B为批次大小，T为序列长度，C为特征数量，每一个时间步都用于预测下一个时间步的结果。
+这是一个基于PyTorch Lightning实现的用于自回归时间序列预测的Transformer模型，结合了高斯混合模型（GMM）来建模预测的不确定性。输入为(B,T,C)，B为批次大小，T为序列长度，C为特征数量。模型对每个特征和时间步都输出多个高斯分布的参数（均值和方差），通过采样和平均得到最终预测值。
 
-例：
-
-```python
-y = model(x)
-```
-
-x的维度为(B,T,C)，y的维度为(B,T,C)，y[b,t,c] 是使用 x[b,0:t,:]进行预测的。
 
 ## 特点
 
 - 多层Transformer架构
 - 因果注意力机制，确保每个时间步只能看到当前及之前的信息
+- 高斯混合模型支持：
+  - 可配置的高斯核数量
+  - 为每个预测输出多个高斯分布
+  - 通过重参数化技巧实现可导的采样过程
+  - 同时优化重构损失和负对数似然损失
 - 支持多头注意力
 - 包含位置编码，捕获序列中的位置信息
 - 可配置的模型大小（层数、隐藏维度、注意力头数等）
@@ -56,31 +54,6 @@ pip install -r requirements.txt
 
 ### 基本用法
 
-```python
-import torch
-from transformer import CausalTransformer
-
-# 初始化模型
-model = CausalTransformer(
-    input_dim=10,      # 输入特征维度
-    hidden_dim=64,     # 隐藏层维度
-    output_dim=10,     # 输出特征维度
-    num_layers=3,      # Transformer层数
-    num_heads=4,       # 注意力头数
-    ff_dim=256,       # 前馈网络维度（可选）
-    dropout=0.1       # Dropout率（可选）
-)
-
-# 创建输入数据
-batch_size = 32
-seq_len = 24
-input_dim = 10
-x = torch.randn(batch_size, seq_len, input_dim)
-
-# 前向传播
-y = model(x)  # 输出形状: (batch_size, seq_len, output_dim)
-```
-
 ### CSV数据支持
 
 模型支持使用CSV数据文件进行训练。CSV中的每一行代表一个时间步，每一列代表一个特征。特征列应命名为"feature_1"、"feature_2"等。
@@ -102,20 +75,31 @@ python train.py
 ```
 
 训练参数可在train.py中修改：
-- seq_len: 输入序列长度（默认100）
-- pred_len: 预测序列长度（默认20）
+- seq_len: 输入序列长度（默认500）
+- pred_len: 预测序列长度（默认500）
 - batch_size: 批次大小（默认32）
 - max_epochs: 最大训练轮数（默认30）
-- learning_rate: 学习率（默认0.001）
-- hidden_dim: 隐藏层维度
-- num_layers: Transformer层数
-- num_heads: 注意力头数
+- learning_rate: 学习率（默认0.0008）
+- hidden_dim: 隐藏层维度（默认256）
+- num_layers: Transformer层数（默认10）
+- num_heads: 注意力头数（默认8）
+- num_gmm_kernels: 高斯核数量（默认5）
 
 可以使用tensorboard可视化训练过程：
 
 ```bash
 tensorboard --logdir=lightning_logs
 ```
+
+### 损失函数
+
+模型使用两个损失函数的组合：
+1. 重构损失（MSE）：衡量预测值与真实值的距离
+2. 负对数似然损失：衡量预测分布对真实值的解释能力
+
+总损失 = 重构损失 + 负对数似然损失
+
+这种组合允许模型不仅学习准确的预测值，还能估计预测的不确定性。
 
 ### 预测和可视化
 
@@ -130,8 +114,8 @@ python predict.py [参数]
 - `--model_path`：模型检查点路径（可选，不指定则自动选择验证损失最低的检查点）
 - `--checkpoints_dir`：检查点目录路径（默认："checkpoints"）
 - `--data_path`：测试数据CSV文件路径（默认："data/test_data.csv"）
-- `--seq_len`：输入序列长度（默认：100）
-- `--pred_len`：预测序列长度（默认：20）
+- `--seq_len`：输入序列长度（默认：500）
+- `--pred_len`：预测序列长度（默认：500）
 - `--output_dir`：输出目录（默认："predictions"）
 
 预测结果的值会保存在`output_dir/prediction_results.csv`中，预测结果图表会保存在`output_dir/prediction_result_feature_{i}.png`中，i为特征索引。
@@ -145,15 +129,17 @@ python predict.py
 python predict.py \
     --model_path checkpoints/best_model.ckpt \
     --data_path data/my_test_data.csv \
-    --seq_len 150 \
-    --pred_len 30 \
+    --seq_len 500 \
+    --pred_len 500 \
     --output_dir my_predictions
 ```
 
 预测过程说明：
 1. 模型采用自回归（autoregressive）方式生成预测序列
-2. 输入序列会被限制在 `seq_len` 长度内（过长则裁剪），以确保与训练时的输入长度匹配
-3. 每次预测时会使用之前的预测结果作为下一步预测的输入
+2. 每个预测步骤都会生成多个高斯分布的参数
+3. 在高斯混合分布中随机采样，作为最终预测值
+4. 输入序列会被限制在 `seq_len` 长度内（过长则裁剪），以确保与训练时的输入长度匹配
+5. 每次预测时会使用之前的预测结果作为下一步预测的输入
 
 预测结果输出：
 1. 预测结果图表（每个特征一个图表）：
@@ -174,7 +160,11 @@ python predict.py \
   - 多头自注意力机制（带有因果掩码）
   - 层归一化
   - 前馈神经网络
-- **输出投影**：将隐藏表示映射回输出特征维度
+- **输出投影**：将隐藏表示映射到高斯混合模型参数空间
+  - 输出维度为 num_features * num_gmm_kernels * 2
+  - 为每个特征预测多个高斯分布的均值和方差
+- **采样层**：使用重参数化技巧从预测的分布中采样
+- **聚合层**：将多个高斯核的采样结果平均得到最终预测
 
 ## 单元测试
 
