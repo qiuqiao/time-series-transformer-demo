@@ -85,7 +85,7 @@ y = model(x)  # 输出形状: (batch_size, seq_len, output_dim)
 
 模型支持使用CSV数据文件进行训练。CSV中的每一行代表一个时间步，每一列代表一个特征。特征列应命名为"feature_1"、"feature_2"等。
 
-1. 生成仅用于测试的玩具数据集：
+1. 生成一个玩具数据集：
 
 ```bash
 python generate_csv_data.py
