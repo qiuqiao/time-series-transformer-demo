@@ -98,6 +98,8 @@ class TransformerLightningModule(pl.LightningModule):
         learning_rate=0.001,
         ff_dim=None,
         dropout=0.1,
+        warmup_steps=200,  # 添加warmup步数参数
+        gamma=0.999,  # 添加指数衰减率参数
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -124,6 +126,7 @@ class TransformerLightningModule(pl.LightningModule):
         y_hat = self(x)
         loss = self.criterion(y_hat, y)
         self.log("train_loss", loss, prog_bar=True, sync_dist=True, on_epoch=True)
+        self.log("learning_rate", self.trainer.optimizers[0].param_groups[0]["lr"])
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -141,16 +144,26 @@ class TransformerLightningModule(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)
+
+        # 创建学习率调度器
+        def warmup_exponential_lr(step):
+            if step < self.hparams.warmup_steps:
+                # 线性预热
+                return float(step) / float(max(1, self.hparams.warmup_steps))
+            else:
+                # 指数衰减
+                return self.hparams.gamma ** ((step - self.hparams.warmup_steps))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=warmup_exponential_lr
         )
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val_loss",
-                "interval": "epoch",
+                "interval": "step",  # 每个step更新学习率
                 "frequency": 1,
             },
         }
@@ -299,6 +312,8 @@ def main():
         num_heads=num_heads,
         learning_rate=8e-4,
         dropout=0.1,
+        warmup_steps=200,
+        gamma=0.999,
     )
 
     # 设置回调
@@ -310,19 +325,20 @@ def main():
         mode="min",
     )
 
-    early_stop_callback = EarlyStopping(monitor="val_loss", patience=10, mode="min")
-
     # 设置日志记录器
     logger = TensorBoardLogger("lightning_logs", name="transformer")
 
     # 创建训练器
     trainer = pl.Trainer(
         max_epochs=max_epochs,
-        callbacks=[checkpoint_callback, early_stop_callback],
+        callbacks=[checkpoint_callback],
         logger=logger,
         log_every_n_steps=10,
         accelerator="auto",
+        precision="16-mixed",  # 启用自动混合精度训练
         val_check_interval=1.0,  # 每个epoch验证一次
+        gradient_clip_val=1.0,  # 添加梯度裁剪阈值
+        gradient_clip_algorithm="norm",  # 使用L2范数裁剪
     )
 
     # 训练模型
