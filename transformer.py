@@ -25,6 +25,9 @@ class MultiHeadAttention(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
+        # 添加一个小的epsilon值来防止数值不稳定
+        self.eps = 1e-6
+
     def forward(self, x, mask=None):
         batch_size = x.size(0)
         seq_len = x.size(1)
@@ -45,17 +48,22 @@ class MultiHeadAttention(nn.Module):
             1, 2
         )  # (batch_size, num_heads, seq_len, head_dim)
 
-        # 计算注意力分数
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(
-            self.head_dim
-        )  # (batch_size, num_heads, seq_len, seq_len)
+        # 计算注意力分数，添加数值稳定性保护
+        scale = math.sqrt(self.head_dim)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / (scale + self.eps)
+
+        # 将scores限制在一个合理的范围内
+        scores = torch.clamp(scores, min=-100, max=100)
 
         # 应用掩码（如果提供）
         if mask is not None:
-            scores = scores + mask
+            scores = scores.masked_fill(mask == float("-inf"), -1e4)
 
-        # 应用softmax
+        # 应用softmax，添加数值稳定性
         attn_weights = F.softmax(scores, dim=-1)
+        # 防止注意力权重为0
+        attn_weights = attn_weights + self.eps
+        attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
         attn_weights = self.dropout(attn_weights)
 
         # 应用注意力权重
@@ -72,6 +80,10 @@ class MultiHeadAttention(nn.Module):
 
         # 最终线性变换
         output = self.output(context)  # (batch_size, seq_len, hidden_dim)
+
+        # 检查并处理任何潜在的NaN值
+        if torch.isnan(output).any():
+            output = torch.where(torch.isnan(output), torch.zeros_like(output), output)
 
         return output
 
