@@ -68,7 +68,19 @@ python generate_csv_data.py
 
 2. 使用CSV数据训练模型：
 
-先在`data`目录中准备好`train_data.csv`和`val_data.csv`，然后运行：
+多个csv：在`data/train_data`目录中准备好多个csv文件，然后运行：
+
+```bash
+python preprocess.py
+```
+
+会自动处理nan值，并把处理后的文件保存到`data/train_data_processed`目录中
+
+单个csv：在`data`目录中准备好`train_data.csv`
+
+无论是单个还是多个csv，需要同时在`data`目录中准备好`val_data.csv`
+
+然后运行：
 
 ```bash
 python train.py

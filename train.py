@@ -17,34 +17,74 @@ np.random.seed(42)
 
 
 class CSVDataset(Dataset):
-    """从CSV文件加载时间序列数据集"""
+    """从CSV文件加载时间序列数据集，支持单个文件或文件夹"""
 
-    def __init__(self, csv_file, seq_len, pred_len=1, valid=False):
+    def __init__(
+        self,
+        csv_path="data/train_data_processed",
+        seq_len=100,
+        pred_len=1,
+        valid=False,
+        feature_columns=None,
+    ):
         """
         初始化数据集
 
         参数:
-            csv_file: CSV文件路径
+            csv_path: CSV文件路径或包含CSV文件的文件夹路径
             seq_len: 输入序列长度
             pred_len: 预测序列长度
             valid: 是否使用验证模式（True时使用分段方式而不是滑动窗口）
+            feature_columns: 要使用的特征列名列表，例如 ['采集值x', '采集值y', '采集值z']
         """
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.valid = valid
-        self.data = self._load_data(csv_file)
-        print(f"Loaded {len(self.data)} samples from {csv_file}")
+        self.feature_columns = feature_columns
+        self.data = []
+
+        # 处理输入路径
+        if os.path.isfile(csv_path):
+            # 单个文件
+            self.data.extend(self._load_data(csv_path))
+        elif os.path.isdir(csv_path):
+            # 文件夹
+            csv_files = [f for f in os.listdir(csv_path) if f.endswith(".csv")]
+            if not csv_files:
+                raise ValueError(f"在 {csv_path} 中没有找到CSV文件")
+
+            for csv_file in csv_files:
+                file_path = os.path.join(csv_path, csv_file)
+                self.data.extend(self._load_data(file_path))
+        else:
+            raise ValueError(f"无效的路径: {csv_path}")
+
+        if not self.data:
+            raise ValueError("没有加载到任何有效数据")
+
+        print(f"总共加载了 {len(self.data)} 个样本")
 
     def _load_data(self, csv_file):
-        """加载CSV数据并处理成序列"""
+        """加载单个CSV文件并处理成序列"""
+        # print(f"正在加载文件: {csv_file}")
         # 读取CSV文件
-        df = pd.read_csv(csv_file)
+        try:
+            df = pd.read_csv(csv_file)
+        except Exception as e:
+            print(f"警告: 无法加载文件 {csv_file}: {str(e)}")
+            return []
 
-        # 获取特征列（除第一列外的所有列）
-        feature_cols = df.columns[1:]
+        # 验证并获取特征列
+        if self.feature_columns is None:
+            raise ValueError("必须指定要使用的特征列名列表")
+
+        # 检查所有指定的特征列是否存在
+        missing_cols = [col for col in self.feature_columns if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"在文件 {csv_file} 中未找到以下特征列: {missing_cols}")
 
         # 提取特征数据
-        features = df[feature_cols].values  # (seq_len, num_features)
+        features = df[self.feature_columns].values  # (seq_len, num_features)
 
         # 创建数据样本
         data = []
@@ -52,7 +92,7 @@ class CSVDataset(Dataset):
         # 检查数据长度是否足够
         if len(df) <= self.seq_len + self.pred_len:
             print(
-                f"警告: {csv_file} 的数据长度 ({len(df)}) 小于序列长度+预测长度 ({self.seq_len + self.pred_len})，无法创建样本"
+                f"警告: {csv_file} 的数据长度 ({len(df)}) 小于序列长度+预测长度 ({self.seq_len + self.pred_len})，跳过此文件"
             )
             return data
 
@@ -75,6 +115,7 @@ class CSVDataset(Dataset):
                 target_seq = features[i + 1 : i + self.seq_len + 1]
                 data.append((input_seq, target_seq))
 
+        # print(f"从 {csv_file} 加载了 {len(data)} 个样本")
         return data
 
     def __len__(self):
@@ -257,15 +298,17 @@ class TransformerLightningModule(pl.LightningModule):
         return output_seq
 
 
-def load_test_sequence(csv_file, seq_len, pred_len):
+def load_test_sequence(csv_file, seq_len, pred_len, feature_columns):
     """从CSV文件加载测试序列"""
     df = pd.read_csv(csv_file)
 
-    # 获取特征列（除第一列外的所有列）
-    feature_cols = df.columns[1:]
+    # 检查所有指定的特征列是否存在
+    missing_cols = [col for col in feature_columns if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"在文件 {csv_file} 中未找到以下特征列: {missing_cols}")
 
     # 提取特征数据
-    features = df[feature_cols].values  # (seq_len, num_features)
+    features = df[feature_columns].values  # (seq_len, num_features)
 
     # 获取初始序列和完整序列
     initial_seq = features[:seq_len]  # (seq_len, num_features)
@@ -275,7 +318,12 @@ def load_test_sequence(csv_file, seq_len, pred_len):
 
 
 def plot_results(
-    true_seq, pred_seq, feature_idx=0, pred_len=20, title="Prediction Results"
+    true_seq,
+    pred_seq,
+    feature_columns,
+    feature_idx=0,
+    pred_len=20,
+    title="Prediction Results",
 ):
     """绘制真实序列和预测序列的对比图"""
     plt.figure(figsize=(12, 6))
@@ -305,21 +353,23 @@ def plot_results(
         x=initial_len - 1, color="green", linestyle="-", label="Prediction Start"
     )
 
-    plt.title(f"{title} - Feature {feature_idx+1}")
+    plt.title(f"{title} - {feature_columns[feature_idx]}")
     plt.xlabel("Time Step")
     plt.ylabel("Value")
     plt.legend()
     plt.grid(True)
-    plt.savefig(f"prediction_result_feature_{feature_idx+1}.png")
+    plt.savefig(f"prediction_result_{feature_columns[feature_idx]}.png")
     plt.show()
 
 
 def main():
     # 参数设置
-    seq_len = 500  # 恢复原来的输入序列长度
-    pred_len = 500  # 预测序列长度
+    seq_len = 256  # 输入序列长度
     batch_size = 32
     max_epochs = 30
+
+    # 设置特征列
+    feature_columns = ["采集值x", "采集值y", "采集值z"]  # 特征列
 
     # 检查数据目录是否存在
     if not os.path.exists("data"):
@@ -331,11 +381,22 @@ def main():
     # 创建数据集
     print("Loading datasets...")
     train_dataset = CSVDataset(
-        csv_file="data/train_data.csv", seq_len=seq_len, valid=False
+        csv_path="data/train_data_processed",
+        seq_len=seq_len,
+        valid=False,
+        feature_columns=feature_columns,
     )
-    val_dataset = CSVDataset(csv_file="data/val_data.csv", seq_len=seq_len, valid=True)
+    val_dataset = CSVDataset(
+        csv_path="data/val_data.csv",
+        seq_len=seq_len,
+        valid=True,
+        feature_columns=feature_columns,
+    )
     test_dataset = CSVDataset(
-        csv_file="data/test_data.csv", seq_len=seq_len, valid=True
+        csv_path="data/test_data.csv",
+        seq_len=seq_len,
+        valid=True,
+        feature_columns=feature_columns,
     )
 
     # 获取特征维度
@@ -397,31 +458,33 @@ def main():
     trainer.fit(model, train_loader, val_loader)
 
     # 测试模型
+    pred_len = seq_len  # 预测序列长度
     print("Testing model...")
     trainer.test(model, test_loader)
 
     # 生成预测
     print("Generating predictions...")
     # 从测试集加载一个样本
-    initial_seq, true_seq = load_test_sequence("data/test_data.csv", seq_len, pred_len)
+    initial_seq, true_seq = load_test_sequence(
+        "data/test_data.csv", seq_len, pred_len, feature_columns
+    )
 
     # 使用模型预测
     pred_seq = model.predict_sequence(initial_seq, pred_len)
 
     # 为每个特征绘制结果
-    num_features = initial_seq.shape[1]
+    num_features = len(feature_columns)
     for i in range(num_features):
         plot_results(
             true_seq,
             pred_seq,
+            feature_columns,
             feature_idx=i,
             pred_len=pred_len,
             title="Transformer Time Series Prediction",
         )
 
-    print(
-        f"Completed! Prediction results saved as 'prediction_result_feature_X.png', where X is the feature index"
-    )
+    print(f"完成！预测结果已保存为对应特征名称的PNG文件")
 
 
 if __name__ == "__main__":
