@@ -10,6 +10,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import Dataset, DataLoader
 from transformer import CausalTransformer
+from einops import rearrange
 
 # 设置随机种子以确保结果可重现
 torch.manual_seed(42)
@@ -43,9 +44,14 @@ class CSVDataset(Dataset):
         self.feature_columns = feature_columns
         self.data = []
 
+        # 初始化统计信息
+        self.feature_means = None
+        self.feature_stds = None
+
         # 处理输入路径
         if os.path.isfile(csv_path):
             # 单个文件
+            self._compute_statistics(csv_path)  # 先计算统计信息
             self.data.extend(self._load_data(csv_path))
         elif os.path.isdir(csv_path):
             # 文件夹
@@ -53,6 +59,21 @@ class CSVDataset(Dataset):
             if not csv_files:
                 raise ValueError(f"在 {csv_path} 中没有找到CSV文件")
 
+            # 首先计算所有文件的统计信息
+            all_data = []
+            for csv_file in csv_files:
+                file_path = os.path.join(csv_path, csv_file)
+                df = pd.read_csv(file_path)
+                if self.feature_columns is None:
+                    raise ValueError("必须指定要使用的特征列名列表")
+                all_data.append(df[self.feature_columns].values)
+
+            # 计算整体统计信息
+            combined_data = np.concatenate(all_data, axis=0)
+            self.feature_means = np.mean(combined_data, axis=0)
+            self.feature_stds = np.std(combined_data, axis=0)
+
+            # 然后加载数据
             for csv_file in csv_files:
                 file_path = os.path.join(csv_path, csv_file)
                 self.data.extend(self._load_data(file_path))
@@ -63,6 +84,17 @@ class CSVDataset(Dataset):
             raise ValueError("没有加载到任何有效数据")
 
         print(f"总共加载了 {len(self.data)} 个样本")
+        print(f"特征均值: {self.feature_means}")
+        print(f"特征标准差: {self.feature_stds}")
+
+    def _compute_statistics(self, csv_file):
+        """计算特征的均值和标准差"""
+        df = pd.read_csv(csv_file)
+        if self.feature_columns is None:
+            raise ValueError("必须指定要使用的特征列名列表")
+        features = df[self.feature_columns].values
+        self.feature_means = np.mean(features, axis=0)
+        self.feature_stds = np.std(features, axis=0)
 
     def _load_data(self, csv_file):
         """加载单个CSV文件并处理成序列"""
@@ -140,15 +172,21 @@ class TransformerLightningModule(pl.LightningModule):
         learning_rate=0.001,
         ff_dim=None,
         dropout=0.1,
-        warmup_steps=200,
-        gamma=0.999,
+        warmup_steps=2000,
+        gamma=0.9999,
+        feature_means=None,
+        feature_stds=None,
     ):
         super().__init__()
         self.save_hyperparameters()
         self.num_features = num_features
         self.num_gmm_kernels = num_gmm_kernels
 
-        # 创建模型 - 输出维度为每个特征的每个高斯核的均值和方差
+        # 保存特征的统计信息
+        self.register_buffer("feature_means", torch.FloatTensor(feature_means))
+        self.register_buffer("feature_stds", torch.FloatTensor(feature_stds))
+
+        # 创建模型
         self.model = CausalTransformer(
             input_dim=input_dim,
             hidden_dim=hidden_dim,
@@ -161,6 +199,14 @@ class TransformerLightningModule(pl.LightningModule):
             dropout=dropout,
         )
 
+    def normalize(self, x):
+        """对输入数据进行归一化"""
+        return (x - self.feature_means) / (self.feature_stds + 1e-8)
+
+    def denormalize(self, x):
+        """还原归一化的数据"""
+        return x * self.feature_stds + self.feature_means
+
     def reparameterize(self, mu, logvar):
         """重参数化技巧"""
         std = torch.exp(0.5 * logvar)
@@ -168,9 +214,12 @@ class TransformerLightningModule(pl.LightningModule):
         return mu + eps * std
 
     def forward(self, x):
+        # 归一化输入数据
+        x_normalized = self.normalize(x)
+
         # 获取transformer的输出
         output = self.model(
-            x
+            x_normalized
         )  # (batch_size, seq_len, num_features * num_gmm_kernels * 2)
 
         batch_size, seq_len, _ = output.shape
@@ -181,13 +230,25 @@ class TransformerLightningModule(pl.LightningModule):
         )
         mu = output[..., 0]  # (batch_size, seq_len, num_features, num_gmm_kernels)
         logvar = output[..., 1]  # (batch_size, seq_len, num_features, num_gmm_kernels)
+        # 还原mu（均值）- 直接使用denormalize
+        mu_denorm = self.denormalize(
+            rearrange(mu, "b s f k -> (k b) s f", k=self.num_gmm_kernels)
+        )  # (batch_size, seq_len, num_features, num_gmm_kernels)
+        mu_denorm = rearrange(mu_denorm, "(k b) s f -> b s f k", k=self.num_gmm_kernels)
 
+        # 还原logvar（对数方差）- 需要考虑标准差的平方
+        # 由于logvar是对数方差，我们需要调整还原方式
+        logvar_denorm = logvar + 2 * torch.log(
+            self.feature_stds.unsqueeze(-1)
+        )  # 广播到num_gmm_kernels维度
+
+        # 使用还原后的参数进行重参数化采样
         res = self.reparameterize(
-            mu, logvar
+            mu_denorm, logvar_denorm
         )  # (batch_size, seq_len, num_features, num_gmm_kernels)
         res = res.mean(dim=-1)  # (batch_size, seq_len, num_features)
 
-        return res, mu, logvar
+        return res, mu_denorm, logvar_denorm
 
     def gaussian_nll_loss(self, y_true, mu, logvar):
         """计算高斯负对数似然损失"""
@@ -214,7 +275,9 @@ class TransformerLightningModule(pl.LightningModule):
         self.log("train_recon_loss", recon_loss)
         self.log("train_nll_loss", nll_loss)
         self.log("learning_rate", self.trainer.optimizers[0].param_groups[0]["lr"])
-        return loss
+        return recon_loss / (1e-6 + recon_loss.detach()) + nll_loss / (
+            1e-6 + nll_loss.detach()
+        )
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
@@ -276,7 +339,7 @@ class TransformerLightningModule(pl.LightningModule):
             curr_seq = torch.FloatTensor(initial_seq).unsqueeze(
                 0
             )  # (1, init_len, num_features)
-            output_seq = initial_seq.copy()  # 使用copy避免修改原始数据
+            output_seq = initial_seq.clone()  # 使用copy避免修改原始数据
 
             # 当前输入序列
             input_seq = curr_seq.clone()
@@ -364,9 +427,9 @@ def plot_results(
 
 def main():
     # 参数设置
-    seq_len = 256  # 输入序列长度
+    seq_len = 500  # 输入序列长度
     batch_size = 32
-    max_epochs = 30
+    max_epochs = 5
 
     # 设置特征列
     feature_columns = ["采集值x", "采集值y", "采集值z"]  # 特征列
@@ -405,9 +468,9 @@ def main():
     output_dim = input_dim  # 输出维度与输入维度相同
 
     # 模型参数
-    hidden_dim = 256
+    hidden_dim = 512
     num_layers = 10
-    num_heads = 8
+    num_heads = 8  # 每个head的最佳hidden dim是8.33*ln(seq_len)~=52
 
     # 创建数据加载器
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -424,8 +487,10 @@ def main():
         num_heads=num_heads,
         learning_rate=8e-4,
         dropout=0.1,
-        warmup_steps=200,
-        gamma=0.999,
+        warmup_steps=2000,
+        gamma=0.9999,
+        feature_means=train_dataset.feature_means,  # 传递训练集的统计信息
+        feature_stds=train_dataset.feature_stds,
     )
 
     # 设置回调
@@ -447,8 +512,8 @@ def main():
         logger=logger,
         log_every_n_steps=10,
         accelerator="auto",
-        precision="16-mixed",  # 启用自动混合精度训练
-        val_check_interval=1.0,  # 每个epoch验证一次
+        precision="16-mixed",
+        val_check_interval=2000,
         gradient_clip_val=1.0,  # 添加梯度裁剪阈值
         gradient_clip_algorithm="norm",  # 使用L2范数裁剪
     )

@@ -107,7 +107,7 @@ def load_model(model_path):
 
     try:
         # 加载检查点
-        checkpoint = torch.load(model_path)
+        checkpoint = torch.load(model_path, weights_only=False)
 
         # 从检查点中获取超参数
         hparams = checkpoint.get("hyper_parameters", {})
@@ -115,12 +115,16 @@ def load_model(model_path):
         # 创建模型实例
         model = TransformerLightningModule(
             input_dim=hparams.get("input_dim", 3),
-            hidden_dim=hparams.get("hidden_dim", 64),
-            output_dim=hparams.get("output_dim", 3),
-            num_layers=hparams.get("num_layers", 3),
+            hidden_dim=hparams.get("hidden_dim", 256),
+            num_features=hparams.get("output_dim", 3),
+            num_layers=hparams.get("num_layers", 10),
             num_heads=hparams.get("num_heads", 4),
-            learning_rate=hparams.get("learning_rate", 0.001),
+            learning_rate=hparams.get("learning_rate", 8e-4),
             dropout=hparams.get("dropout", 0.1),
+            warmup_steps=hparams.get("warmup_steps", 2000),
+            gamma=hparams.get("gamma", 0.9999),
+            feature_means=hparams.get("feature_means", None),
+            feature_stds=hparams.get("feature_stds", None),
         )
 
         # 加载模型权重
@@ -161,8 +165,13 @@ def load_test_data(data_path, seq_len):
     # 读取CSV文件
     df = pd.read_csv(data_path)
 
-    # 获取特征列（排除time_step列）
-    feature_cols = [col for col in df.columns if col.startswith("feature")]
+    # 定义特征列
+    feature_cols = ["采集值x", "采集值y", "采集值z"]
+
+    # 检查所有指定的特征列是否存在
+    missing_cols = [col for col in feature_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"在文件 {data_path} 中未找到以下特征列: {missing_cols}")
 
     # 提取特征数据
     features = df[feature_cols].values  # (seq_len, num_features)
@@ -201,17 +210,19 @@ def predict_sequence(model, initial_seq, pred_len):
     try:
         # 使用模型的predict_sequence方法进行预测
         with torch.no_grad():
-            # 注意：不要在这里转换为张量，因为模型的predict_sequence方法会处理这个
             print(f"初始序列形状: {initial_seq.shape}")
 
+            # 将初始序列转换为张量
+            initial_tensor = torch.FloatTensor(initial_seq)
             # 调用模型的predict_sequence方法
-            pred_seq = model.predict_sequence(initial_seq, pred_len)
+            pred_seq = model.predict_sequence(initial_tensor, pred_len)
 
-        # 返回真实序列和预测序列
-        true_seq = initial_seq  # 这里只返回初始序列作为真实序列
+            # 如果预测结果是张量，转换为numpy数组
+            if isinstance(pred_seq, torch.Tensor):
+                pred_seq = pred_seq.squeeze(0).cpu().numpy()
 
         print(f"预测完成，预测序列形状: {pred_seq.shape}")
-        return true_seq, pred_seq
+        return initial_seq, pred_seq
     except Exception as e:
         print(f"预测过程中出错: {e}")
         # 在测试环境中，如果预测失败，返回一个模拟的预测序列
